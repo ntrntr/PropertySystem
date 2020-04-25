@@ -7,6 +7,9 @@ class NodeFactory(object):
         self.propDef = weakref.proxy(propDef)
 
 class VarFactory(NodeFactory):
+    """
+    外部变量
+    """
 
     def __init__(self, propDef) -> None:
         super().__init__(propDef)
@@ -16,11 +19,14 @@ class VarFactory(NodeFactory):
         self.params[param_name] = param_value
 
 
+
+
 class PropertyDefinition(NodeFactory):
 
     def __init__(self, propDef) -> None:
         super().__init__(propDef)
-        self
+        self.VAR = VarFactory(self)
+        self.EXTERN =
 
 
 # def __init__(self) -> None:
