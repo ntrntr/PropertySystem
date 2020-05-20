@@ -1,11 +1,12 @@
+# -*- coding: utf-8 -*-
+
 import random
 
 
 
 class BattleUnit(object):
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self):
         self.strength = 1
 
 
@@ -30,8 +31,7 @@ class BattleUnit(object):
 
 class Equip(object):
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self):
         self.equipList = []
 
     def equipHurtFactor(self):
@@ -39,8 +39,7 @@ class Equip(object):
 
 class Entity(object):
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self):
         self.level = 1
 
 
