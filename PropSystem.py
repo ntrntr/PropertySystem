@@ -3,17 +3,20 @@ import weakref
 
 PUSHABLE, NONPUSHABLE = 1, 2
 
+
 class NodeFactory(object):
 
     def __init__(self, propDef):
         super(NodeFactory, self).__init__(propDef)
         self.propDef = weakref.proxy(propDef)
 
+
 PUSHABLE, NONPUSHABLE = 1, 2
 CLEAN, DIRTY, COND_DIRTY = 0, 1, 2
 
+
 class Functor(object):
-    def __init__(self, prop_def, name, update_mode = NONPUSHABLE):
+    def __init__(self, prop_def, name, update_mode=NONPUSHABLE):
         self.name = name
         # 依赖变量
         self.depends = []
@@ -61,7 +64,6 @@ class Functor(object):
     def _derive(self, f):
         self.deriveds.append(f)
 
-
     def _invalidateChildren(self, prop_holder):
         prop_def = prop_holder.property_def
 
@@ -71,7 +73,6 @@ class Functor(object):
             if slot.dirty == CLEAN:
                 slot.dirty = DIRTY
                 p._invalidateChildren(prop_holder)
-
 
     def _pushNewValueToChildren(self, prop_holder):
         prop_def = prop_holder.property_def
@@ -89,6 +90,7 @@ class Functor(object):
             prop_def = prop_holder.property_def
             for pn in prop_def.alias_map[self.name]:
                 prop_def._onPropertyValueUpdated(prop_holder, pn, old_value, new_value)
+
 
 class VarFunctor(Functor):
     def __init__(self, prop_def,
@@ -119,11 +121,6 @@ class VarFunctor(Functor):
             return slot.var_value
 
     def _forceEvaluate(self, prop_holder, do_decend, do_update, old_prop_value=None):
-        # evaluate current node
-        # if any one of my dependancy is not valid, then set myself as invalid as well
-        # or try evaluate it once again if do_decend == True
-        #
-        # do_decend control
         prop_def = prop_holder.property_def
         args = [None for i in range(len(self.depends))]
         slot = prop_holder._local_property_state[self.local_prop_slot_idx]
@@ -154,6 +151,63 @@ class VarFunctor(Functor):
                 old_value = old_prop_value
             self._onUpdated(prop_holder, old_value, slot.var_value)
 
+    def callEvalFunctor(self, prop_holder, *args):
+        if type(self.eval_functor) is str:
+            return getattr(self.eval_cls, self.eval_functor)(self, prop_holder, *args)
+        else:
+            return self.eval_functor(self, prop_holder, *args)
+
+
+class ExtFunctor(Functor):
+    def __init__(self, prop_def, name):
+        super(ExtFunctor, self).__init__(prop_def, name, update_mode=NONPUSHABLE)
+        self.force_eval = False
+
+    def set_local_prop_slot_idx(self, prop_def, idx):
+        super(ExtFunctor, self).set_local_prop_slot_idx(prop_def, idx)
+        prop_def.setAlwaysValid(self.local_prop_slot_idx)
+
+    def update(self, prop_holder, v):
+        self._onPendingUpdate(prop_holder)
+        old_value = getattr(prop_holder, self.name)
+        setattr(prop_holder, self.name, v)
+        prop_holder._local_property_state[self.local_prop_slot_idx].dirty = CLEAN
+        self._invalidateChildren(prop_holder)
+        self._pushNewValueToChildren(prop_holder)
+        self._onUpdated(prop_holder, old_value, v)
+
+    def evaluate(self, prop_holder):
+        return self._evaluate(prop_holder)
+
+    def _evaluate(self, prop_holder, do_assert=False):
+        try:
+            val = getattr(prop_holder, self.name)
+        except AttributeError:
+            prop_holder._local_property_state[self.local_prop_slot_idx].dirty = DIRTY
+            assert False, "ExtFunctor: property (%s) is not ready" % self.name
+            return None
+        else:
+            prop_holder._local_property_state[self.local_prop_slot_idx].dirty = CLEAN
+            return val
+
+    def _forceEvaluate(self, prop_holder, do_decend, do_update, old_prop_value=None):
+        # only called from recovery
+        try:
+            val = getattr(prop_holder, self.name)
+        except AttributeError:
+            prop_holder._local_property_state[self.local_prop_slot_idx].dirty = DIRTY
+        else:
+            prop_holder._local_property_state[self.local_prop_slot_idx].dirty = CLEAN
+            assert not do_update, self.name
+
+    def _onPendingUpdate(self, prop_holder):
+        prop_holder.property_def._onExternPropertyValuePendingUpdate(prop_holder, self.name,
+                                                                     getattr(prop_holder, self.name))
+
+    def _onUpdated(self, prop_holder, old_value, new_value):
+        if old_value != new_value:
+            prop_holder.property_def._onPropertyValueUpdated(prop_holder, self.name, old_value, new_value)
+
 
 class VarFactory(NodeFactory):
     """
@@ -167,9 +221,8 @@ class VarFactory(NodeFactory):
     def setNodeParam(self, param_name, param_value):
         self.params[param_name] = param_value
 
-    def __call__(self, def_var_name, depends, eval_functor, force_eval=False, update_mode = NONPUSHABLE, var_names = None):
+    def __call__(self, def_var_name, depends, eval_functor, force_eval=False, update_mode=NONPUSHABLE, var_names=None):
         pass
-
 
 
 class ExternFactory(NodeFactory):
@@ -177,8 +230,10 @@ class ExternFactory(NodeFactory):
     外部变量
     """
 
-    def __init__(self, propDef):
-        super(ExternFactory, self).__init__(propDef)
+    def __call__(self, def_var_name, var_names=None):
+        if var_names is None:
+            var_names = [def_var_name]
+        self.prop_def.addProperty(ExtFunctor(self.prop_def, def_var_name), var_names=var_names)
 
 
 class PropertyDefinition(NodeFactory):
@@ -187,7 +242,6 @@ class PropertyDefinition(NodeFactory):
         super(PropertyDefinition, self).__init__(propDef)
         self.VAR = VarFactory(self)
         self.EXTERN = None
-
 
 
 class PlayerPropDef(PropertyDefinition):
