@@ -3,6 +3,22 @@ import weakref
 
 PUSHABLE, NONPUSHABLE = 1, 2
 
+CLEAN, DIRTY, COND_DIRTY = 0, 1, 2
+
+class LocalPropertySlot(object):
+	# @dirty
+	#	0: clean
+	#	1: dirty
+	#	2: conditional dirty (default)
+	#
+	#	So after migration, every node by default is marked as conditional dirty
+
+	def __init__(self):
+		self.dirty = COND_DIRTY # conditional dirty
+		self.var_value = None
+
+	def __repr__(self):
+		return '<%d, %s>' % (self.dirty, self.var_value)
 
 class NodeFactory(object):
 
@@ -11,12 +27,11 @@ class NodeFactory(object):
         self.propDef = weakref.proxy(propDef)
 
 
-PUSHABLE, NONPUSHABLE = 1, 2
-CLEAN, DIRTY, COND_DIRTY = 0, 1, 2
 
 
 class Functor(object):
-    def __init__(self, prop_def, name, update_mode=NONPUSHABLE):
+    def __init__(self, prop_def, name,
+                 update_mode=NONPUSHABLE):
         self.name = name
         # 依赖变量
         self.depends = []
@@ -221,8 +236,24 @@ class VarFactory(NodeFactory):
     def setNodeParam(self, param_name, param_value):
         self.params[param_name] = param_value
 
-    def __call__(self, def_var_name, depends, eval_functor, force_eval=False, update_mode=NONPUSHABLE, var_names=None):
-        pass
+    def __call__(self, def_var_name, depends, eval_functor, force_eval=False, update_mode=NONPUSHABLE, var_names=None, init_eval = False):
+        var = VarFunctor(self.prop_def,
+                         def_var_name,
+                         self.prop_def, eval_functor,
+                         force_eval, update_mode)
+
+        if self.params:
+            for pn, p in self.params.iteritems():
+                setattr(var, pn, p)
+            self.params = {}
+
+        def setupDepends():
+            for d in depends:
+                var.depend(self.prop_def, d)
+
+        if var_names is None:
+            var_names = [def_var_name]
+        self.prop_def.addProperty(var, late_setup=setupDepends, var_names=var_names, init_eval=init_eval)
 
 
 class ExternFactory(NodeFactory):
@@ -236,13 +267,100 @@ class ExternFactory(NodeFactory):
         self.prop_def.addProperty(ExtFunctor(self.prop_def, def_var_name), var_names=var_names)
 
 
-class PropertyDefinition(NodeFactory):
+class PropertyDefinition(object):
 
-    def __init__(self, propDef):
-        super(PropertyDefinition, self).__init__(propDef)
+    def __init__(self):
+        self.property_store = {}
+        self.alias_map = {}
+        self.init_eval = []
         self.VAR = VarFactory(self)
-        self.EXTERN = None
+        self.EXTERN = ExternFactory(self)
 
+        # user definitions
+        self.define()
+
+    def PVrefresh(self, prop_holder):
+        for p in self.property_store.itervalues():
+            p.markInvalid(prop_holder)
+
+    def hasProperty(self, prop):
+        return prop in self.property_store
+
+    def _getProperty(self, prop_name):
+        assert prop_name in self.property_store, '%s has not %s' % (self, prop_name)
+        return self.property_store.get(prop_name)
+
+    def setAlwaysValid(self, slot_idx):
+        self.always_true_nodes.append(slot_idx)
+
+    def initEvals(self, prop_holder):
+        for pn in self.init_eval:
+            p = self._getProperty(pn)
+            v = p.evaluate(prop_holder)
+
+            slot = p.getPropertyStateSlot(prop_holder)
+            if slot.dirty == CLEAN:
+                p._onUpdated(prop_holder, None, v)
+
+    def getNextAvailableSlotIdx(self):
+        local_idx, self._local_property_state_num = self._local_property_state_num, self._local_property_state_num + 1
+        return local_idx
+
+    def addProperty(self, prop, late_setup=None, var_names=None, init_eval=False):
+        if var_names is None:
+            var_names = [prop.name]
+
+        self.alias_map[prop.name] = var_names
+
+        for vn in var_names:
+            self.property_store[vn] = prop
+
+        local_prop_slot_idx = self.getNextAvailableSlotIdx()
+        prop.set_local_prop_slot_idx(self, local_prop_slot_idx)
+
+        if late_setup:
+            self.late_setup.append(late_setup)
+
+        if init_eval:
+            self.init_eval.append(prop.name)
+
+    def removeProperty(self, pn):
+        p = self._getProperty(pn)
+        var_names = self.alias_map[p.name]
+        for v in var_names:
+            del self.property_store[v]
+
+        del self.alias_map[p.name]
+
+    def initPropertyHolder(self, prop_holder):
+        self.initAlwaysTrueNodes(prop_holder)
+
+    def initAlwaysTrueNodes(self, prop_holder):
+        slots = prop_holder._local_property_state
+        for pidx in self.always_true_nodes:
+            slot = slots[pidx]
+            slot.dirty = CLEAN
+
+    def invalidateAllNodes(self, prop_holder):
+        slots = prop_holder._local_property_state
+        for s in slots:
+            s.dirty = COND_DIRTY
+
+        self.initAlwaysTrueNodes(prop_holder)
+
+    def PV(self, prop_holder, prop_name, *default):
+        if not default or self.hasProperty(prop_name):
+            return self._getProperty(prop_name).evaluate(prop_holder)
+        else:
+            return default[0]
+
+    def updatePV(self, prop_holder, prop_name, v):
+        self._getProperty(prop_name).update(prop_holder, v)
+
+    def _onPropertyValueUpdated(self, prop_holder, name, old_val, new_val):
+        var_names = self.alias_map.get(name, [name])
+        for vn in var_names:
+            prop_holder.onPropertyValueUpdated(vn, old_val, new_val)
 
 class PlayerPropDef(PropertyDefinition):
     pass
