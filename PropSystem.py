@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import weakref
+import random
 
 PUSHABLE, NONPUSHABLE = 1, 2
 
@@ -23,11 +24,7 @@ class LocalPropertySlot(object):
 class NodeFactory(object):
 
     def __init__(self, propDef):
-        super(NodeFactory, self).__init__(propDef)
-        self.propDef = weakref.proxy(propDef)
-
-
-
+        self.prop_def = weakref.proxy(propDef)
 
 class Functor(object):
     def __init__(self, prop_def, name,
@@ -223,7 +220,6 @@ class ExtFunctor(Functor):
         if old_value != new_value:
             prop_holder.property_def._onPropertyValueUpdated(prop_holder, self.name, old_value, new_value)
 
-
 class VarFactory(NodeFactory):
     """
     外部变量
@@ -273,11 +269,32 @@ class PropertyDefinition(object):
         self.property_store = {}
         self.alias_map = {}
         self.init_eval = []
+        self._local_property_state_num = 0
+        self.always_true_nodes = []
+        self.late_setup = []
+
         self.VAR = VarFactory(self)
         self.EXTERN = ExternFactory(self)
 
         # user definitions
         self.define()
+
+        # internal definitions
+        self._internalDefinitions()
+
+        for late_setup_functor in self.late_setup:
+            late_setup_functor()
+
+        del self.late_setup
+
+        self.calculateUpdateSequence()
+
+    @property
+    def local_property_state_num(self):
+        return self._local_property_state_num
+
+    def define(self):
+        pass
 
     def PVrefresh(self, prop_holder):
         for p in self.property_store.itervalues():
@@ -362,5 +379,145 @@ class PropertyDefinition(object):
         for vn in var_names:
             prop_holder.onPropertyValueUpdated(vn, old_val, new_val)
 
+    def _internalDefinitions(self):
+        self.EXTERN('prop_random')
+
+    def regenRandomNum(self, prop_holder):
+        self.updatePV(prop_holder, 'prop_random', random.random())
+
+    def _onExternPropertyValuePendingUpdate(self, prop_holder, name, cur_val):
+        if name == 'prop_random':
+            return
+
+        var_names = self.alias_map.get(name, [name])
+        for vn in var_names:
+            prop_holder.onExternPropertyValuePendingUpdate(vn, cur_val)
+
+    @classmethod
+    def is_extern_functor(cls, ftor):
+        return isinstance(ftor, (ExtFunctor,))
+
+    def getExternPropertyNames(self):
+        nms = []
+        for v in self.property_store.itervalues():
+            if self.is_extern_functor(v) and v.name not in ('prop_random',):
+                nms.append(v.name)
+
+        return nms
+
+    def calculateUpdateSequence(self):
+        ext_names = self.getExternPropertyNames()
+        self.update_var_seq = {}
+        for en in ext_names:
+            e = self._getProperty(en)
+            inarc = {e.name: 0}
+            tq = [e]
+            visited = set([e.name])
+            while tq:
+                c = tq.pop()
+                # print "c.name tt", c.name
+                for dn in c.deriveds:
+                    d = self._getProperty(dn)
+                    # print "d.name", d.name, visited, d.update_mode, PUSHABLE
+                    if d.update_mode == PUSHABLE:
+                        inarc[d.name] = inarc.get(d.name, 0) + 1
+                        # print "inarc add", d.name, visited
+                        if d.name not in visited:
+                            visited.add(d.name)
+                            tq.append(d)
+
+            seq = []
+            tq = [e]
+            while tq:
+                c = tq.pop()
+                seq.append(c.name)
+                ins = inarc[c.name]
+                assert ins == 0, c.name
+                for dn in c.deriveds:
+                    d = self._getProperty(dn)
+                    if d.update_mode == PUSHABLE:
+                        inarc[d.name] -= 1
+                        if inarc[d.name] == 0:
+                            tq.append(d)
+
+            assert all((x == 0 for x in inarc.values())), inarc
+            self.update_var_seq[e.name] = seq[1:]
+
+
 class PlayerPropDef(PropertyDefinition):
-    pass
+
+    def do_roll(self, node, attd_ety, level, prop_random):
+        print "level", level, attd_ety.param['attacker_level'], (level - attd_ety.param['attacker_level']) / level
+        return prop_random < (level - attd_ety.param['attacker_level']) *1.0 / level
+
+    def base_hurt(self, node, attd_ety, do_roll, strength, equip_strength):
+        if do_roll:
+            return strength * equip_strength * 1.5
+        else:
+            return strength * equip_strength
+
+    def define(self):
+        super(PlayerPropDef, self).define()
+        self.EXTERN('level')
+        self.EXTERN('strength')
+        self.EXTERN('equip_strength')
+        self.VAR('do_roll', ['level', 'prop_random'], 'do_roll')
+        self.VAR('base_hurt', ['do_roll', 'strength', 'equip_strength'], 'base_hurt')
+
+class iPropertySystem(object):
+    def __init__(self):
+        super(iPropertySystem, self).__init__()
+        self._property_def = None
+
+    @property
+    def property_def(self):
+        if not self._property_def:
+            self._property_def = PlayerPropDef()
+        return self._property_def
+
+    def PV(self, prop_name, *default):
+        return self.property_def.PV(self, prop_name, *default)
+
+    def updatePV(self,  prop_name, v):
+        self.property_def.updatePV(self, prop_name, v)
+
+    def initProperty(self):
+        lc = [LocalPropertySlot() for i in range(self.property_def.local_property_state_num)]
+        self._local_property_state = lc
+        self.property_def.initPropertyHolder(self)
+
+    def regenRandomNum(self):
+        self.property_def.regenRandomNum(self)
+
+    def onPropertyValueUpdated(self, name, old_val, new_val):
+        print "name:%s update from:%s to:%s" % (name, old_val, new_val)
+
+
+class Avatar(iPropertySystem):
+
+    def __init__(self):
+        super(Avatar, self).__init__()
+
+    def init(self):
+        self.prop_random = 0
+        self.level = 2
+        self.strength = 1
+        self.equip_strength = 1
+        self.param = {}
+        self.initProperty()
+
+    def onExternPropertyValuePendingUpdate(self, name, cur_val):
+        print "name:%s cur_val:%s" % (name, cur_val, )
+
+
+
+if __name__ == '__main__':
+    avatar = Avatar()
+    avatar.init()
+    print avatar.PV('prop_random')
+    avatar.regenRandomNum()
+    avatar.param = {"attacker_level":1}
+    print "prop_radom:%s" % (avatar.PV('prop_random'), )
+    print avatar.PV('level')
+    print avatar.PV('do_roll')
+    print avatar.PV('base_hurt')
